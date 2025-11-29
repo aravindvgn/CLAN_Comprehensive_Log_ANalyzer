@@ -11,7 +11,7 @@ import difflib
 
 # Handle missing log_parser gracefully
 try:
-    from log_parser import parse_log_file, convert_to_polars
+    from universal_log_parser import parse_log_file, convert_to_polars
 except ImportError:
     print("Warning: log_parser module not found. Some functionality may be limited.")
     def parse_log_file():
@@ -24,7 +24,7 @@ class Config:
     """Centralized configuration for all application parameters"""
     
     # ============ Application Settings ============
-    APP_TITLE = "CLAN v0.9t"
+    APP_TITLE = "CLAN v0.95"
     WINDOW_SIZE = "1400x800"
     LEFT_PANEL_WIDTH = 300
     
@@ -75,6 +75,7 @@ class Config:
     MENU_HIDE_COLUMN = "Hide '{}' Column"
     MENU_CANNOT_HIDE_TIMESTAMP = "Cannot hide timestamp column"
     MENU_SHOW_HIDDEN_COLUMNS = "Show Hidden Columns"
+    MENU_VIEW_RAW_HEADER = "View Raw Header"
     
     # Dialog Titles
     DIALOG_SEARCH_TITLE = "Search in {}"
@@ -319,6 +320,15 @@ class LogDataPlotter:
         self.column_vars = {}
         self.current_column_dialog = None
 
+        # Configure style to allow multi-line headers
+        # This MUST be done before setup_gui() is called
+        style = ttk.Style(self.root)
+        # Get the default font to avoid overriding the theme's font
+        default_font = style.lookup("Treeview.Heading", "font")
+        # Apply new padding [LR, TB] to make space for two lines
+        # Increase the second value (top/bottom padding) to make the header taller
+        style.configure("Table.Treeview.Heading", font=default_font, padding=[5, 3, 5, 35], anchor='nw')
+
         self._setup_icon()
         self.setup_gui()
         
@@ -356,11 +366,19 @@ class LogDataPlotter:
         
         print("Cleaning up resources...")
         
-        # Cancel timers using proper attribute names
+        # Cancel timers using proper attribute names with race condition protection
         for timer_attr in ['table1_scroll_timer', 'table2_scroll_timer', 'search_scroll_timer']:
-            if hasattr(self, timer_attr) and getattr(self, timer_attr) is not None:
-                self.root.after_cancel(getattr(self, timer_attr))
-                print(f"Cancelled {timer_attr}")
+            if hasattr(self, timer_attr):
+                timer_id = getattr(self, timer_attr)
+                if timer_id is not None:
+                    try:
+                        self.root.after_cancel(timer_id)
+                        setattr(self, timer_attr, None)  # Clear the reference
+                        print(f"Cancelled {timer_attr}")
+                    except tk.TclError:
+                        # Timer may have already fired or window destroyed
+                        print(f"{timer_attr} already handled")
+                        pass
         
         # Clear matplotlib resources
         plt.close('all')
@@ -371,6 +389,11 @@ class LogDataPlotter:
         
         print("Cleanup completed")
 
+    @staticmethod
+    def is_raw_data_column(col_name: str) -> bool:
+        """Check if a column name is the parser's raw data column"""
+        return col_name == '__parser_raw_line__'
+    
     def _get_timer_attr_name(self, table_state: TableState) -> str:
         """Get proper timer attribute name for table state"""
         if table_state == self.table1_state:
@@ -638,7 +661,7 @@ class LogDataPlotter:
         table_container = ttk.Frame(parent_frame)
         table_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        table_tree = ttk.Treeview(table_container)
+        table_tree = ttk.Treeview(table_container, style="Table.Treeview")
         tab_refs['table_tree'] = table_tree
         
         # Use lambda functions for event binding
@@ -774,7 +797,7 @@ class LogDataPlotter:
         # Column selection
         column_vars = {}
         searchable_columns = [col for col in table_state.current_table_df.columns 
-                            if col.lower() != 'timestamp']
+                            if col.lower() != 'timestamp' and not self.is_raw_data_column(col)]
         
         # Select all/deselect all buttons
         select_frame = ttk.Frame(scrollable_frame)
@@ -807,7 +830,7 @@ class LogDataPlotter:
                         canvas.yview_scroll(-1, "units")
                     elif event.num == 5:
                         canvas.yview_scroll(1, "units")
-            except:
+            except (AttributeError, tk.TclError):
                 pass
         
         def bind_mousewheel(event):
@@ -835,7 +858,7 @@ class LogDataPlotter:
                 canvas.unbind("<MouseWheel>")
                 canvas.unbind("<Button-4>")
                 canvas.unbind("<Button-5>")
-            except:
+            except (AttributeError, tk.TclError):
                 pass
             dialog.destroy()
         
@@ -922,7 +945,7 @@ class LogDataPlotter:
                 try:
                     progress_dialog.update_progress(idx, Config.PROGRESS_SEARCH_ROW.format(idx+1, total_rows))
                     self.root.update_idletasks()
-                except:
+                except Exception as e:
                     pass
             
             for col in columns:
@@ -946,7 +969,7 @@ class LogDataPlotter:
                     print(f"Warning: Error processing cell [{idx}][{col}]: {e}")
                     try:
                         cell_str = self._safe_cell_to_string(cell_value)
-                    except:
+                    except (ValueError, TypeError):
                         cell_str = ""
                 
                 if not case_sensitive:
@@ -1046,7 +1069,7 @@ class LogDataPlotter:
                         if self._validate_fuzzy_match(search_term, substring, ratio):
                             print(f"  Fuzzy sliding match: '{search_term}' -> '{best_match}' (score: {best_ratio:.2f})")
                             return True
-                except:
+                except (ValueError, TypeError):
                     continue
         
         return False
@@ -1068,7 +1091,7 @@ class LogDataPlotter:
                             if self._validate_fuzzy_match(search_term, word, ratio):
                                 print(f"  Fuzzy word match: '{search_term}' -> '{word}' (score: {ratio:.2f})")
                                 return True
-                    except:
+                    except (ValueError, TypeError):
                         continue
         
         return False
@@ -1137,7 +1160,7 @@ class LogDataPlotter:
         if self.current_column_dialog:
             try:
                 self.current_column_dialog.destroy()
-            except:
+            except (KeyError, ValueError, TypeError, AttributeError) as e:
                 pass
         
         dialog = self._create_column_dialog(table_state)
@@ -1240,7 +1263,7 @@ class LogDataPlotter:
                         canvas.yview_scroll(-1, "units")
                     elif event.num == 5:
                         canvas.yview_scroll(1, "units")
-            except:
+            except (AttributeError, tk.TclError):
                 pass
         
         def bind_mousewheel(event):
@@ -1418,7 +1441,7 @@ class LogDataPlotter:
                         f"Loading rows {start_row+1:,} to {end_row:,}  ({percentage}%)"
                     )
                     self.root.update_idletasks()  # Keep UI responsive
-                except:
+                except Exception as e:
                     pass
             
             # Insert the batch
@@ -1514,9 +1537,19 @@ class LogDataPlotter:
         total_columns = len(visible_columns)
         
         for col in visible_columns:
-            try:
-                table_tree.heading(col, text=str(col))
+            try:               
+                # Get the column's data type
+                try:
+                    col_dtype_str = str(df[col].dtype)
+                except Exception:
+                    col_dtype_str = "unknown"
                 
+                # Create the new multi-line header text
+                header_text = f"{col}\n({col_dtype_str})"
+                
+                # Set the new header text
+                table_tree.heading(col, text=header_text, anchor='nw') # Added anchor='nw' for consistency
+                                
                 col_width = self.calculate_column_width(df[col], col, total_columns)
                 
                 if col.lower() == 'timestamp':
@@ -1525,8 +1558,12 @@ class LogDataPlotter:
                                     width=timestamp_width, 
                                     minwidth=timestamp_width,
                                     anchor='w')
-                else:
-                    min_header_width = len(str(col)) * Config.CHAR_WIDTH_MULTIPLIER + Config.HEADER_PADDING
+                else:                  
+                    # Calculate min_header_width based on the *longer* of the two new lines
+                    header_line1_width = len(col) * Config.CHAR_WIDTH_MULTIPLIER + Config.HEADER_PADDING
+                    header_line2_width = len(f"({col_dtype_str})") * Config.CHAR_WIDTH_MULTIPLIER + Config.HEADER_PADDING
+                    min_header_width = max(header_line1_width, header_line2_width)
+                    
                     final_width = max(int(col_width), min_header_width, Config.MIN_COLUMN_WIDTH)
                     table_tree.column(col, 
                                     width=final_width, 
@@ -1673,7 +1710,7 @@ class LogDataPlotter:
                     bbox = table_tree.bbox(child)
                     if bbox:
                         last_visible = i
-                except:
+                except Exception as e:
                     continue
             
             if last_visible is not None:
@@ -1888,7 +1925,7 @@ class LogDataPlotter:
                         if 0 <= col_index < len(columns):
                             col_name = columns[col_index]
                             self.show_column_context_menu(event, col_name, table_state)
-                except:
+                except (KeyError, ValueError, TypeError, AttributeError) as e:
                     pass
         else:
             self.on_table_right_click(event, table_state)
@@ -1897,6 +1934,23 @@ class LogDataPlotter:
         """Show context menu for column operations"""
         context_menu = tk.Menu(self.root, tearoff=0)
         
+        # Check if raw header data is available and at least ONE column has a real name
+        has_raw_header = False
+        if table_state.current_table_df is not None:
+            # Check if DataFrame has raw header metadata
+            if '__parser_raw_header__' in table_state.current_table_df.attrs:
+                # Check if ANY column in the DataFrame has a real name (not auto-generated)
+                import re
+                all_columns = table_state.current_table_df.columns
+                # Check if at least one column is NOT auto-generated and NOT the raw line column
+                for col in all_columns:
+                    if col == '__parser_raw_line__':
+                        continue
+                    if not re.match(r'^column_\d+$', col):
+                        # Found at least one real column name
+                        has_raw_header = True
+                        break
+               
         if col_name.lower() != 'timestamp':
             context_menu.add_command(label=Config.MENU_HIDE_COLUMN.format(col_name), 
                                 command=lambda: self.hide_column(col_name, table_state))
@@ -1910,10 +1964,82 @@ class LogDataPlotter:
             context_menu.add_command(label=Config.MENU_SHOW_HIDDEN_COLUMNS, 
                                 command=lambda: self.show_column_management_dialog(table_state, tab_refs))
         
+        # Add "View Raw Header" option if available
+        if has_raw_header:
+            context_menu.add_separator()
+            context_menu.add_command(
+                label=Config.MENU_VIEW_RAW_HEADER,
+                command=lambda: self.show_raw_header_dialog(table_state)
+            )
+
         try:
             context_menu.tk_popup(event.x_root, event.y_root)
         finally:
             context_menu.grab_release()
+
+    def show_raw_header_dialog(self, table_state: TableState):
+        """Display the raw header line in a dialog"""
+        if table_state.current_table_df is None:
+            return
+        
+        raw_header = table_state.current_table_df.attrs.get('__parser_raw_header__', None)
+        if not raw_header:
+            messagebox.showinfo("No Raw Header", "No raw header data available for this DataFrame.")
+            return
+        
+        # Create dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Raw Header Line")
+        dialog.geometry("900x200")
+        dialog.transient(self.root)
+        
+        # Header label
+        header_label = tk.Label(dialog, text="Original Header Line from Log File:", 
+                               font=('Arial', 10, 'bold'), pady=5)
+        header_label.pack(fill='x', padx=10)
+        
+        # Create text widget with scrollbar
+        text_frame = tk.Frame(dialog)
+        text_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        scrollbar_y = tk.Scrollbar(text_frame)
+        scrollbar_y.pack(side='right', fill='y')
+        
+        scrollbar_x = tk.Scrollbar(text_frame, orient='horizontal')
+        scrollbar_x.pack(side='bottom', fill='x')
+        
+        text_widget = tk.Text(text_frame, wrap='none', font=('Courier', 10),
+                             yscrollcommand=scrollbar_y.set,
+                             xscrollcommand=scrollbar_x.set)
+        text_widget.pack(side='left', fill='both', expand=True)
+        
+        scrollbar_y.config(command=text_widget.yview)
+        scrollbar_x.config(command=text_widget.xview)
+        
+        # Insert content
+        text_widget.insert('1.0', raw_header)
+        text_widget.config(state='disabled')
+        
+        # Copy button
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(fill='x', padx=10, pady=5)
+        
+        def copy_to_clipboard():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(raw_header)
+            messagebox.showinfo("Copied", "Raw header line copied to clipboard!")
+        
+        copy_btn = tk.Button(button_frame, text="Copy to Clipboard", command=copy_to_clipboard)
+        copy_btn.pack(side='left', padx=5)
+        
+        close_btn = tk.Button(button_frame, text="Close", command=dialog.destroy)
+        close_btn.pack(side='right', padx=5)
+        
+        # Center dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f'+{x}+{y}')
 
     def hide_column(self, col_name, table_state: TableState):
         """Hide a specific column for specific table state"""
@@ -2019,6 +2145,14 @@ class LogDataPlotter:
         context_menu.add_command(label=Config.MENU_COPY_CELL_VALUE, 
                             command=self.copy_clicked_cell_value)
         
+        # Add "View Raw Data" option if parser's raw data column exists
+        if table_state.current_table_df is not None:
+            has_raw_data = any(self.is_raw_data_column(col) for col in table_state.current_table_df.columns)
+            if has_raw_data:
+                context_menu.add_separator()
+                context_menu.add_command(label="View Raw Data", 
+                                    command=self.show_clicked_row_raw_data)
+        
         try:
             context_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -2077,6 +2211,80 @@ class LogDataPlotter:
         except Exception as e:
             messagebox.showerror(Config.DIALOG_ERROR, Config.MSG_COULD_NOT_COPY.format(str(e)))
 
+    def show_clicked_row_raw_data(self):
+        """Show raw data for the last right-clicked row"""
+        if not hasattr(self, 'last_clicked_row') or not hasattr(self, 'last_clicked_table_state'):
+            messagebox.showwarning(Config.DIALOG_ERROR, Config.MSG_NO_CELL_SELECTED)
+            return
+        
+        actual_df_row = self.last_clicked_row
+        table_state = self.last_clicked_table_state
+        
+        try:
+            df = table_state.current_table_df
+            if df is None:
+                messagebox.showwarning(Config.DIALOG_WARNING, "Raw data not available for this table.")
+                return
+            
+            # Find the parser's raw data column
+            raw_col = None
+            for col in df.columns:
+                if self.is_raw_data_column(col):
+                    raw_col = col
+                    break
+            
+            if raw_col is None:
+                messagebox.showwarning(Config.DIALOG_WARNING, "Raw data not available for this table.")
+                return
+            
+            if actual_df_row < len(df):
+                raw_data = df.iloc[actual_df_row][raw_col]
+                self.show_raw_data_dialog(actual_df_row, raw_data)
+            else:
+                messagebox.showwarning(Config.DIALOG_ERROR, Config.MSG_ROW_OUT_OF_BOUNDS.format(actual_df_row))
+        except Exception as e:
+            messagebox.showerror(Config.DIALOG_ERROR, f"Could not retrieve raw data: {str(e)}")
+
+    def show_raw_data_dialog(self, row_index: int, raw_data: str):
+        """Show a dialog with the raw data for a row"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Raw Data - Row {row_index + 1}")  # 1-indexed for user display
+        dialog.geometry("800x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Content frame
+        content_frame = ttk.Frame(dialog)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Text display with scrollbars
+        text_frame = ttk.Frame(content_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        
+        text_widget = tk.Text(text_frame, wrap=tk.NONE, font=("Consolas", 10))
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        v_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.configure(yscrollcommand=v_scroll.set)
+        
+        h_scroll = ttk.Scrollbar(content_frame, orient=tk.HORIZONTAL, command=text_widget.xview)
+        h_scroll.pack(fill=tk.X)
+        text_widget.configure(xscrollcommand=h_scroll.set)
+        
+        # Insert raw data
+        text_widget.insert(tk.END, str(raw_data) if raw_data is not None else "(No raw data)")
+        text_widget.configure(state=tk.DISABLED)
+        
+        # Button frame
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Button(button_frame, text=Config.BTN_COPY_CLIPBOARD, 
+                command=lambda: self.copy_to_clipboard(str(raw_data) if raw_data is not None else "")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text=Config.BTN_CLOSE, 
+                command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
+
     def export_current_table_to_csv(self, table_state: TableState):
         """Export current table data to CSV for specific table state"""
         if table_state.current_table_df is None:
@@ -2099,7 +2307,14 @@ class LogDataPlotter:
             )
             
             if file_path:
-                table_state.current_table_df.to_csv(file_path, index=False)
+                # Exclude raw data columns from export
+                df_to_export = table_state.current_table_df.copy()
+                raw_cols = [col for col in df_to_export.columns if self.is_raw_data_column(col)]
+                if raw_cols:
+                    df_to_export = df_to_export.drop(columns=raw_cols)
+                    print(f"Excluded raw data columns from export: {raw_cols}")
+                
+                df_to_export.to_csv(file_path, index=False)
                 messagebox.showinfo(Config.DIALOG_SUCCESS, Config.MSG_EXPORT_SUCCESS.format(file_path))
             
         except Exception as e:
@@ -2128,13 +2343,13 @@ class LogDataPlotter:
                 try:
                     self.progress['value'] = value
                     self.status_label.config(text=text)
-                except:
+                except Exception as e:
                     pass
             
             def close(self):
                 try:
                     self.dialog.destroy()
-                except:
+                except Exception as e:
                     pass
         
         return ProgressDialog(self.root, title, max_value)
@@ -2157,8 +2372,10 @@ class LogDataPlotter:
             raw_dataframes, filename = parse_log_file()
             
             if not raw_dataframes:
+                messagebox.showwarning(Config.DIALOG_WARNING, "No data was loaded from the file.")
                 return
             
+            # Only update state if parsing succeeded
             self.clear_plot()
             self._clear_all_tables()
             
@@ -2168,6 +2385,33 @@ class LogDataPlotter:
             self.pandas_dfs = self.split_mixed_dataframes(raw_dataframes)
             self.polars_dfs = convert_to_polars(self.pandas_dfs)
             
+            # Check if any dataframe has a timestamp column
+            has_any_timestamp = any('timestamp' in df.columns for df in self.pandas_dfs.values())
+            
+            if not has_any_timestamp and self.pandas_dfs:
+                # No timestamp found - show selection dialog
+                selected_timestamp = self.show_timestamp_selection_dialog(self.pandas_dfs)
+                
+                if selected_timestamp:
+                    # User selected a column - rename it to timestamp
+                    df_name, col_name = selected_timestamp
+                    if df_name in self.pandas_dfs:
+                        self.pandas_dfs[df_name].rename(columns={col_name: 'timestamp'}, inplace=True)
+                        print(f"User selected '{col_name}' from {df_name} as timestamp")
+                        
+                        # Also update in ALL dataframe if it exists
+                        all_df_name = f"{df_name}_ALL"
+                        if all_df_name in self.pandas_dfs:
+                            self.pandas_dfs[all_df_name].rename(columns={col_name: 'timestamp'}, inplace=True)
+                        
+                        # Re-split with the new timestamp column
+                        self.pandas_dfs = self.split_mixed_dataframes({df_name: self.pandas_dfs[df_name]})
+                        self.polars_dfs = convert_to_polars(self.pandas_dfs)
+                else:
+                    # User cancelled - warn them
+                    messagebox.showwarning(Config.DIALOG_WARNING, 
+                                         "No timestamp column selected. Plotting may not work correctly.")
+            
             self.plotted_variables.clear()
             self.plotted_variables_right.clear()
             
@@ -2176,7 +2420,12 @@ class LogDataPlotter:
             messagebox.showinfo(Config.DIALOG_SUCCESS, Config.MSG_LOAD_SUCCESS)
             
         except Exception as e:
-            messagebox.showerror(Config.DIALOG_ERROR, Config.MSG_LOAD_FAILED.format(str(e)))
+            # Show error without updating the title bar
+            error_msg = f"Failed to parse log file:\n\n{str(e)}\n\nPlease check the log file format."
+            messagebox.showerror(Config.DIALOG_ERROR, error_msg)
+            print(f"Parse error details: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _clear_all_tables(self):
         """Clear all table tabs"""
@@ -2212,6 +2461,195 @@ class LogDataPlotter:
         if hasattr(self, 'search_details_label'):
             self.search_details_label.config(text=Config.LABEL_SEARCH_PLACEHOLDER)
 
+    def show_timestamp_selection_dialog(self, dataframes: Dict[str, pd.DataFrame]) -> Optional[Tuple[str, str]]:
+        """Show dialog for user to select timestamp column when auto-detection fails.
+        
+        Returns:
+            Tuple of (dataframe_name, column_name) if user selects, None if cancelled
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Timestamp Column")
+        dialog.geometry("900x600")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (900 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (600 // 2)
+        dialog.geometry(f"900x600+{x}+{y}")
+        
+        result = {'selected': None}
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog, padding=10)
+        main_frame.grid(row=0, column=0, sticky='nsew')
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        
+        # Title label
+        title_label = ttk.Label(main_frame, text="⚠️  No Timestamp Column Detected", 
+                               font=('TkDefaultFont', 12, 'bold'))
+        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky='w')
+        
+        info_label = ttk.Label(main_frame, 
+                              text="Please select the column that represents time/timestamp for plotting:",
+                              wraplength=850)
+        info_label.grid(row=1, column=0, columnspan=2, pady=(0, 10), sticky='w')
+        
+        # Create PanedWindow for left (selection) and right (data preview)
+        paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
+        paned.grid(row=2, column=0, columnspan=2, sticky='nsew', pady=(0, 10))
+        main_frame.grid_rowconfigure(2, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
+        
+        # Left panel - Column selection
+        left_frame = ttk.Frame(paned)
+        paned.add(left_frame, weight=1)
+        
+        ttk.Label(left_frame, text="Available Columns:", font=('TkDefaultFont', 10, 'bold')).pack(anchor='w', pady=(0, 5))
+        
+        # Listbox with scrollbar for columns
+        list_frame = ttk.Frame(left_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        columns_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, 
+                                     selectmode=tk.SINGLE, font=('Courier', 10))
+        scrollbar.config(command=columns_listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        columns_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Populate listbox with columns
+        column_map = {}  # Maps display index to (df_name, col_name)
+        list_index = 0
+        
+        for df_name, df in sorted(dataframes.items()):
+            if df_name.endswith('_ALL'):
+                continue  # Skip _ALL dataframes
+            
+            # Add dataframe header
+            columns_listbox.insert(tk.END, f"╔══ {df_name} ══")
+            columns_listbox.itemconfig(list_index, {'bg': '#e0e0e0', 'fg': '#000000'})
+            list_index += 1
+            
+            for col in df.columns:
+                if col == '__parser_raw_line__':
+                    continue
+                
+                # Check if column is numeric (likely to be timestamp)
+                is_numeric = pd.api.types.is_numeric_dtype(df[col])
+                dtype_str = str(df[col].dtype)
+                
+                # Highlight likely timestamp columns
+                display = f"  • {col} ({dtype_str})"
+                if is_numeric and any(word in col.lower() for word in ['time', 'sec', 'elapsed', 'duration', 'stamp']):
+                    display += " ⭐"
+                
+                columns_listbox.insert(tk.END, display)
+                column_map[list_index] = (df_name, col)
+                
+                # Highlight numeric columns
+                if is_numeric:
+                    columns_listbox.itemconfig(list_index, {'fg': '#0066cc'})
+                
+                list_index += 1
+        
+        # Right panel - Data preview
+        right_frame = ttk.Frame(paned)
+        paned.add(right_frame, weight=2)
+        
+        ttk.Label(right_frame, text="Data Preview (first 50 rows):", 
+                 font=('TkDefaultFont', 10, 'bold')).pack(anchor='w', pady=(0, 5))
+        
+        # Text widget with scrollbar for data preview
+        preview_frame = ttk.Frame(right_frame)
+        preview_frame.pack(fill=tk.BOTH, expand=True)
+        
+        preview_scroll = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL)
+        preview_text = tk.Text(preview_frame, yscrollcommand=preview_scroll.set,
+                              font=('Courier', 9), wrap=tk.NONE, state=tk.DISABLED)
+        preview_scroll.config(command=preview_text.yview)
+        
+        # Horizontal scrollbar
+        h_scroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=preview_text.xview)
+        preview_text.config(xscrollcommand=h_scroll.set)
+        
+        preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Populate preview with first dataframe
+        def update_preview():
+            """Update preview based on selected column"""
+            selection = columns_listbox.curselection()
+            if selection:
+                idx = selection[0]
+                if idx in column_map:
+                    df_name, col_name = column_map[idx]
+                    df = dataframes[df_name]
+                    
+                    preview_text.config(state=tk.NORMAL)
+                    preview_text.delete(1.0, tk.END)
+                    
+                    # Show header
+                    preview_text.insert(tk.END, f"DataFrame: {df_name}\n")
+                    preview_text.insert(tk.END, f"Selected Column: {col_name}\n")
+                    preview_text.insert(tk.END, f"Shape: {df.shape}\n")
+                    preview_text.insert(tk.END, "="*80 + "\n\n")
+                    
+                    # Show first 50 rows
+                    preview_df = df.head(50)
+                    preview_text.insert(tk.END, preview_df.to_string())
+                    
+                    preview_text.config(state=tk.DISABLED)
+        
+        # Initial preview of first dataframe
+        if dataframes:
+            first_df_name = sorted([k for k in dataframes.keys() if not k.endswith('_ALL')])[0]
+            df = dataframes[first_df_name]
+            
+            preview_text.config(state=tk.NORMAL)
+            preview_text.insert(tk.END, f"DataFrame: {first_df_name}\n")
+            preview_text.insert(tk.END, f"Shape: {df.shape}\n")
+            preview_text.insert(tk.END, "="*80 + "\n\n")
+            preview_text.insert(tk.END, df.head(50).to_string())
+            preview_text.config(state=tk.DISABLED)
+        
+        columns_listbox.bind('<<ListboxSelect>>', lambda e: update_preview())
+        
+        # Buttons frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=(10, 0), sticky='e')
+        
+        def on_ok():
+            selection = columns_listbox.curselection()
+            if selection:
+                idx = selection[0]
+                if idx in column_map:
+                    result['selected'] = column_map[idx]
+                    dialog.destroy()
+                else:
+                    messagebox.showwarning("Invalid Selection", 
+                                         "Please select a column, not a header line.")
+            else:
+                messagebox.showwarning("No Selection", 
+                                     "Please select a column from the list.")
+        
+        def on_cancel():
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(button_frame, text="OK", command=on_ok).pack(side=tk.RIGHT)
+        
+        # Handle window close
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+        
+        # Wait for dialog to close
+        dialog.wait_window()
+        
+        return result['selected']
+
     def update_title_bar(self):
         """Update the title bar with current filename"""
         if self.current_log_filename:
@@ -2230,18 +2668,27 @@ class LogDataPlotter:
                 split_dataframes[df_name] = df
                 continue
             
+            # Check if timestamp column exists
+            has_timestamp = 'timestamp' in df.columns
+            
             numerical_cols, non_numerical_cols = self._categorize_columns(df)
             
             if numerical_cols and non_numerical_cols:
-                numerical_df = df[['timestamp'] + numerical_cols].copy()
+                # Create numerical DataFrame with timestamp if available
+                if has_timestamp:
+                    numerical_df = df[['timestamp'] + numerical_cols].copy()
+                else:
+                    numerical_df = df[numerical_cols].copy()
+                
                 split_dataframes[df_name] = numerical_df
                 
                 complete_df = df.copy()
                 split_dataframes[f"{df_name}_ALL"] = complete_df
                 
+                ts_info = "timestamp + " if has_timestamp else ""
                 print(f"Split {df_name}:")
-                print(f"  {df_name}: timestamp + {len(numerical_cols)} numerical columns (for plotting)")
-                print(f"  {df_name}_ALL: timestamp + {len(df.columns)-1} total columns (for table viewing)")
+                print(f"  {df_name}: {ts_info}{len(numerical_cols)} numerical columns (for plotting)")
+                print(f"  {df_name}_ALL: {len(df.columns)} total columns (for table viewing)")
                 
             else:
                 split_dataframes[df_name] = df
@@ -2305,7 +2752,8 @@ class LogDataPlotter:
         
         ordered_columns = []
         for col in reference_df.columns:
-            if col == 'timestamp':
+            # Skip timestamp and parser's raw data column
+            if col == 'timestamp' or self.is_raw_data_column(col):
                 continue
                 
             is_numeric = False
@@ -2354,7 +2802,7 @@ class LogDataPlotter:
             if len(values) >= 3 and values[2]:
                 return values[2]
             return None
-        except:
+        except (TypeError, AttributeError):
             return None
     
     def get_selected_variables(self) -> List[str]:
@@ -2770,6 +3218,14 @@ class LogDataPlotter:
         table_state.current_table_df = df
         table_state.current_table_name = df_name
         
+        # Auto-hide parser's raw data column
+        raw_cols = [col for col in df.columns if self.is_raw_data_column(col)]
+        for raw_col in raw_cols:
+            if raw_col not in table_state.hidden_columns:
+                table_state.hidden_columns.add(raw_col)
+        if raw_cols:
+            print(f"Auto-hidden raw data column in {tab_name}: {raw_cols}")
+        
         # Switch to the tab
         if table_state == self.table1_state:
             self.notebook.select(self.table1_frame)
@@ -2902,13 +3358,13 @@ class LogDataPlotter:
                 try:
                     element = value[i]
                     content += f"[{i}]: {element}\n"
-                except:
+                except (TypeError, AttributeError):
                     content += f"[{i}]: <error reading element>\n"
             
             try:
                 comma_separated = ", ".join(str(item) for item in value)
                 content += f"\nComma-separated:\n{comma_separated}"
-            except:
+            except Exception as e:
                 content += f"\nRaw representation:\n{str(value)}"
             
             content += self._calculate_numeric_statistics(value)
@@ -2948,7 +3404,7 @@ class LogDataPlotter:
                 return "(NaN value)"
             else:
                 return str(value)
-        except:
+        except (ValueError, TypeError):
             return str(value)
 
     def _calculate_numeric_statistics(self, value):
@@ -2968,7 +3424,7 @@ class LogDataPlotter:
                         min_val = num_val
                     if max_val is None or num_val > max_val:
                         max_val = num_val
-                except:
+                except (ValueError, TypeError):
                     continue
             
             if numeric_count > 0:

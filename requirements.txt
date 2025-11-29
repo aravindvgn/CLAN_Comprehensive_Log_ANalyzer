@@ -1,5 +1,14 @@
-pandas
-polars
-easygui
-matplotlib
-numpy>=1.20.3
+# Universal Log Parser & Log Plotter Requirements
+# Minimum Python Version: 3.12+
+
+# Required Dependencies
+pandas>=2.0.0          # For nullable Int64 type and better performance
+matplotlib>=3.7.0      # GUI plotting and visualization
+numpy>=1.24.0          # Numerical operations
+
+# Optional Dependencies (install if needed)
+polars>=0.19.0       # Alternative high-performance DataFrame library
+easygui>=0.98.3      # Alternative file dialog (fallback)
+
+# Note: tkinter is included with standard Python installation
+# If tkinter is missing, install python3-tk (Linux) or reinstall Python with tcl/tk support
